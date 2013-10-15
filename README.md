@@ -1,6 +1,8 @@
 docker-py
 =========
 
+[![Build Status](https://travis-ci.org/shin-/docker-py.png)](https://travis-ci.org/shin-/docker-py)
+
 An API client for docker written in Python
 
 API
