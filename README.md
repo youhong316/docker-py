@@ -1,7 +1,11 @@
 docker-py
 =========
 
+<<<<<<< HEAD
 [![Build Status](https://travis-ci.org/dotcloud/docker-py.png)](https://travis-ci.org/dotcloud/docker-py)
+=======
+[![Build Status](https://travis-ci.org/shin-/docker-py.png)](https://travis-ci.org/shin-/docker-py)
+>>>>>>> e3dfa3384ad3cee3320c402222f68b667ebc8142
 
 An API client for docker written in Python
 
