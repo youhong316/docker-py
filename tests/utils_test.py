@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import os.path
 import shutil
@@ -9,7 +11,7 @@ from docker.errors import DockerException
 from docker.utils import (
     parse_repository_tag, parse_host, convert_filters, kwargs_from_env,
     create_host_config, Ulimit, LogConfig, parse_bytes, parse_env_file,
-    exclude_paths,
+    exclude_paths, decode_json_header
 )
 from docker.utils.ports import build_port_bindings, split_port
 from docker.auth import resolve_repository_name, resolve_authconfig
@@ -18,6 +20,7 @@ from . import base
 from .helpers import make_tree
 
 import pytest
+import six
 
 TEST_CERT_DIR = os.path.join(
     os.path.dirname(__file__),
@@ -253,6 +256,16 @@ class UtilsTest(base.BaseTestCase):
     def test_logconfig_invalid_config_type(self):
         with pytest.raises(ValueError):
             LogConfig(type=LogConfig.types.JSON, config='helloworld')
+
+    def test_decode_json_header(self):
+        obj = {'a': 'b', 'c': 1}
+        data = None
+        if six.PY3:
+            data = base64.b64encode(bytes(json.dumps(obj), 'utf-8'))
+        else:
+            data = base64.b64encode(json.dumps(obj))
+        decoded_data = decode_json_header(data)
+        self.assertEqual(obj, decoded_data)
 
     def test_resolve_repository_name(self):
         # docker hub library image
