@@ -1,40 +1,27 @@
-# Copyright 2013 dotCloud inc.
-
-#    Licensed under the Apache License, Version 2.0 (the "License");
-#    you may not use this file except in compliance with the License.
-#    You may obtain a copy of the License at
-
-#        http://www.apache.org/licenses/LICENSE-2.0
-
-#    Unless required by applicable law or agreed to in writing, software
-#    distributed under the License is distributed on an "AS IS" BASIS,
-#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#    See the License for the specific language governing permissions and
-#    limitations under the License.
-
-import io
+import base64
+import json
 import os
 import os.path
-import json
 import shlex
-import tarfile
-import tempfile
-import warnings
-from distutils.version import StrictVersion
-from fnmatch import fnmatch
+import string
 from datetime import datetime
+from distutils.version import StrictVersion
 
-import requests
 import six
 
-from .. import constants
 from .. import errors
 from .. import tls
-from .types import Ulimit, LogConfig
 
+if six.PY2:
+    from urllib import splitnport
+    from urlparse import urlparse
+else:
+    from urllib.parse import splitnport, urlparse
 
 DEFAULT_HTTP_HOST = "127.0.0.1"
-DEFAULT_UNIX_SOCKET = "http+unix://var/run/docker.sock"
+DEFAULT_UNIX_SOCKET = "http+unix:///var/run/docker.sock"
+DEFAULT_NPIPE = 'npipe:////./pipe/docker_engine'
+
 BYTE_UNITS = {
     'b': 1,
     'k': 1024,
@@ -43,103 +30,25 @@ BYTE_UNITS = {
 }
 
 
-def mkbuildcontext(dockerfile):
-    f = tempfile.NamedTemporaryFile()
-    t = tarfile.open(mode='w', fileobj=f)
-    if isinstance(dockerfile, io.StringIO):
-        dfinfo = tarfile.TarInfo('Dockerfile')
-        if six.PY3:
-            raise TypeError('Please use io.BytesIO to create in-memory '
-                            'Dockerfiles with Python 3')
-        else:
-            dfinfo.size = len(dockerfile.getvalue())
-            dockerfile.seek(0)
-    elif isinstance(dockerfile, io.BytesIO):
-        dfinfo = tarfile.TarInfo('Dockerfile')
-        dfinfo.size = len(dockerfile.getvalue())
-        dockerfile.seek(0)
-    else:
-        dfinfo = t.gettarinfo(fileobj=dockerfile, arcname='Dockerfile')
-    t.addfile(dfinfo, dockerfile)
-    t.close()
-    f.seek(0)
-    return f
+def create_ipam_pool(*args, **kwargs):
+    raise errors.DeprecatedMethod(
+        'utils.create_ipam_pool has been removed. Please use a '
+        'docker.types.IPAMPool object instead.'
+    )
 
 
-def tar(path, exclude=None, dockerfile=None):
-    f = tempfile.NamedTemporaryFile()
-    t = tarfile.open(mode='w', fileobj=f)
-
-    root = os.path.abspath(path)
-    exclude = exclude or []
-
-    for path in sorted(exclude_paths(root, exclude, dockerfile=dockerfile)):
-        t.add(os.path.join(root, path), arcname=path, recursive=False)
-
-    t.close()
-    f.seek(0)
-    return f
+def create_ipam_config(*args, **kwargs):
+    raise errors.DeprecatedMethod(
+        'utils.create_ipam_config has been removed. Please use a '
+        'docker.types.IPAMConfig object instead.'
+    )
 
 
-def exclude_paths(root, patterns, dockerfile=None):
-    """
-    Given a root directory path and a list of .dockerignore patterns, return
-    an iterator of all paths (both regular files and directories) in the root
-    directory that do *not* match any of the patterns.
-
-    All paths returned are relative to the root.
-    """
-    if dockerfile is None:
-        dockerfile = 'Dockerfile'
-
-    exceptions = [p for p in patterns if p.startswith('!')]
-
-    include_patterns = [p[1:] for p in exceptions]
-    include_patterns += [dockerfile, '.dockerignore']
-
-    exclude_patterns = list(set(patterns) - set(exceptions))
-
-    all_paths = get_paths(root)
-
-    # Remove all paths that are matched by any exclusion pattern
-    paths = [
-        p for p in all_paths
-        if not any(match_path(p, pattern) for pattern in exclude_patterns)
-    ]
-
-    # Add back the set of paths that are matched by any inclusion pattern.
-    # Include parent dirs - if we add back 'foo/bar', add 'foo' as well
-    for p in all_paths:
-        if any(match_path(p, pattern) for pattern in include_patterns):
-            components = p.split('/')
-            paths += [
-                '/'.join(components[:end])
-                for end in range(1, len(components) + 1)
-            ]
-
-    return set(paths)
-
-
-def get_paths(root):
-    paths = []
-
-    for parent, dirs, files in os.walk(root, followlinks=False):
-        parent = os.path.relpath(parent, root)
-        if parent == '.':
-            parent = ''
-        for path in dirs:
-            paths.append(os.path.join(parent, path))
-        for path in files:
-            paths.append(os.path.join(parent, path))
-
-    return paths
-
-
-def match_path(path, pattern):
-    pattern = pattern.rstrip('/')
-    pattern_components = pattern.split('/')
-    path_components = path.split('/')[:len(pattern_components)]
-    return fnmatch('/'.join(path_components), pattern)
+def decode_json_header(header):
+    data = base64.b64decode(header)
+    if six.PY3:
+        data = data.decode('utf-8')
+    return json.loads(data)
 
 
 def compare_version(v1, v2):
@@ -170,29 +79,6 @@ def version_lt(v1, v2):
 
 def version_gte(v1, v2):
     return not version_lt(v1, v2)
-
-
-def ping_registry(url):
-    warnings.warn(
-        'The `ping_registry` method is deprecated and will be removed.',
-        DeprecationWarning
-    )
-
-    return ping(url + '/v2/', [401]) or ping(url + '/v1/_ping')
-
-
-def ping(url, valid_4xx_statuses=None):
-    try:
-        res = requests.get(url, timeout=3)
-    except Exception:
-        return False
-    else:
-        # We don't send yet auth headers
-        # and a v2 registry will respond with status 401
-        return (
-            res.status_code < 400 or
-            (valid_4xx_statuses and res.status_code in valid_4xx_statuses)
-        )
 
 
 def _convert_port_binding(binding):
@@ -228,7 +114,7 @@ def convert_port_bindings(port_bindings):
     for k, v in six.iteritems(port_bindings):
         key = str(k)
         if '/' not in key:
-            key = key + '/tcp'
+            key += '/tcp'
         if isinstance(v, list):
             result[key] = [_convert_port_binding(binding) for binding in v]
         else:
@@ -242,12 +128,19 @@ def convert_volume_binds(binds):
 
     result = []
     for k, v in binds.items():
+        if isinstance(k, six.binary_type):
+            k = k.decode('utf-8')
+
         if isinstance(v, dict):
             if 'ro' in v and 'mode' in v:
                 raise ValueError(
                     'Binding cannot contain both "ro" and "mode": {}'
                     .format(repr(v))
                 )
+
+            bind = v['bind']
+            if isinstance(bind, six.binary_type):
+                bind = bind.decode('utf-8')
 
             if 'ro' in v:
                 mode = 'ro' if v['ro'] else 'rw'
@@ -256,103 +149,171 @@ def convert_volume_binds(binds):
             else:
                 mode = 'rw'
 
-            result.append('{0}:{1}:{2}'.format(
-                k, v['bind'], mode
-            ))
+            result.append(
+                six.text_type('{0}:{1}:{2}').format(k, bind, mode)
+            )
         else:
-            result.append('{0}:{1}:rw'.format(k, v))
+            if isinstance(v, six.binary_type):
+                v = v.decode('utf-8')
+            result.append(
+                six.text_type('{0}:{1}:rw').format(k, v)
+            )
     return result
 
 
-def parse_repository_tag(repo):
-    column_index = repo.rfind(':')
-    if column_index < 0:
-        return repo, None
-    tag = repo[column_index + 1:]
-    slash_index = tag.find('/')
-    if slash_index < 0:
-        return repo[:column_index], tag
+def convert_tmpfs_mounts(tmpfs):
+    if isinstance(tmpfs, dict):
+        return tmpfs
 
-    return repo, None
+    if not isinstance(tmpfs, list):
+        raise ValueError(
+            'Expected tmpfs value to be either a list or a dict, found: {}'
+            .format(type(tmpfs).__name__)
+        )
+
+    result = {}
+    for mount in tmpfs:
+        if isinstance(mount, six.string_types):
+            if ":" in mount:
+                name, options = mount.split(":", 1)
+            else:
+                name = mount
+                options = ""
+
+        else:
+            raise ValueError(
+                "Expected item in tmpfs list to be a string, found: {}"
+                .format(type(mount).__name__)
+            )
+
+        result[name] = options
+    return result
 
 
-# Based on utils.go:ParseHost http://tinyurl.com/nkahcfh
-# fd:// protocol unsupported (for obvious reasons)
-# Added support for http and https
-# Protocol translation: tcp -> http, unix -> http+unix
-def parse_host(addr, platform=None):
-    proto = "http+unix"
-    host = DEFAULT_HTTP_HOST
-    port = None
+def convert_service_networks(networks):
+    if not networks:
+        return networks
+    if not isinstance(networks, list):
+        raise TypeError('networks parameter must be a list.')
+
+    result = []
+    for n in networks:
+        if isinstance(n, six.string_types):
+            n = {'Target': n}
+        result.append(n)
+    return result
+
+
+def parse_repository_tag(repo_name):
+    parts = repo_name.rsplit('@', 1)
+    if len(parts) == 2:
+        return tuple(parts)
+    parts = repo_name.rsplit(':', 1)
+    if len(parts) == 2 and '/' not in parts[1]:
+        return tuple(parts)
+    return repo_name, None
+
+
+def parse_host(addr, is_win32=False, tls=False):
     path = ''
+    port = None
+    host = None
 
-    if not addr and platform == 'win32':
-        addr = '{0}:{1}'.format(DEFAULT_HTTP_HOST, 2375)
-
+    # Sensible defaults
+    if not addr and is_win32:
+        return DEFAULT_NPIPE
     if not addr or addr.strip() == 'unix://':
         return DEFAULT_UNIX_SOCKET
 
     addr = addr.strip()
-    if addr.startswith('http://'):
-        addr = addr.replace('http://', 'tcp://')
-    if addr.startswith('http+unix://'):
-        addr = addr.replace('http+unix://', 'unix://')
 
-    if addr == 'tcp://':
+    parsed_url = urlparse(addr)
+    proto = parsed_url.scheme
+    if not proto or any([x not in string.ascii_letters + '+' for x in proto]):
+        # https://bugs.python.org/issue754016
+        parsed_url = urlparse('//' + addr, 'tcp')
+        proto = 'tcp'
+
+    if proto == 'fd':
+        raise errors.DockerException('fd protocol is not implemented')
+
+    # These protos are valid aliases for our library but not for the
+    # official spec
+    if proto == 'http' or proto == 'https':
+        tls = proto == 'https'
+        proto = 'tcp'
+    elif proto == 'http+unix':
+        proto = 'unix'
+
+    if proto not in ('tcp', 'unix', 'npipe', 'ssh'):
         raise errors.DockerException(
-            "Invalid bind address format: {0}".format(addr))
-    elif addr.startswith('unix://'):
-        addr = addr[7:]
-    elif addr.startswith('tcp://'):
-        proto = "http"
-        addr = addr[6:]
-    elif addr.startswith('https://'):
-        proto = "https"
-        addr = addr[8:]
-    elif addr.startswith('fd://'):
-        raise errors.DockerException("fd protocol is not implemented")
-    else:
-        if "://" in addr:
-            raise errors.DockerException(
-                "Invalid bind address protocol: {0}".format(addr)
-            )
-        proto = "http"
+            "Invalid bind address protocol: {}".format(addr)
+        )
 
-    if proto != "http+unix" and ":" in addr:
-        host_parts = addr.split(':')
-        if len(host_parts) != 2:
-            raise errors.DockerException(
-                "Invalid bind address format: {0}".format(addr)
-            )
-        if host_parts[0]:
-            host = host_parts[0]
-
-        port = host_parts[1]
-        if '/' in port:
-            port, path = port.split('/', 1)
-            path = '/{0}'.format(path)
-        try:
-            port = int(port)
-        except Exception:
-            raise errors.DockerException(
-                "Invalid port: %s", addr
-            )
-
-    elif proto in ("http", "https") and ':' not in addr:
+    if proto == 'tcp' and not parsed_url.netloc:
+        # "tcp://" is exceptionally disallowed by convention;
+        # omitting a hostname for other protocols is fine
         raise errors.DockerException(
-            "Bind address needs a port: {0}".format(addr))
-    else:
-        host = addr
+            'Invalid bind address format: {}'.format(addr)
+        )
 
-    if proto == "http+unix":
-        return "{0}://{1}".format(proto, host)
-    return "{0}://{1}:{2}{3}".format(proto, host, port, path)
+    if any([
+        parsed_url.params, parsed_url.query, parsed_url.fragment,
+        parsed_url.password
+    ]):
+        raise errors.DockerException(
+            'Invalid bind address format: {}'.format(addr)
+        )
+
+    if parsed_url.path and proto == 'ssh':
+        raise errors.DockerException(
+            'Invalid bind address format: no path allowed for this protocol:'
+            ' {}'.format(addr)
+        )
+    else:
+        path = parsed_url.path
+        if proto == 'unix' and parsed_url.hostname is not None:
+            # For legacy reasons, we consider unix://path
+            # to be valid and equivalent to unix:///path
+            path = '/'.join((parsed_url.hostname, path))
+
+    if proto in ('tcp', 'ssh'):
+        # parsed_url.hostname strips brackets from IPv6 addresses,
+        # which can be problematic hence our use of splitnport() instead.
+        host, port = splitnport(parsed_url.netloc)
+        if port is None or port < 0:
+            if proto != 'ssh':
+                raise errors.DockerException(
+                    'Invalid bind address format: port is required:'
+                    ' {}'.format(addr)
+                )
+            port = 22
+
+        if not host:
+            host = DEFAULT_HTTP_HOST
+
+    # Rewrite schemes to fit library internals (requests adapters)
+    if proto == 'tcp':
+        proto = 'http{}'.format('s' if tls else '')
+    elif proto == 'unix':
+        proto = 'http+unix'
+
+    if proto in ('http+unix', 'npipe'):
+        return "{}://{}".format(proto, path).rstrip('/')
+    return '{0}://{1}:{2}{3}'.format(proto, host, port, path).rstrip('/')
 
 
 def parse_devices(devices):
     device_list = []
     for device in devices:
-        device_mapping = device.split(":")
+        if isinstance(device, dict):
+            device_list.append(device)
+            continue
+        if not isinstance(device, six.string_types):
+            raise errors.DockerException(
+                'Invalid device type {0}'.format(type(device))
+            )
+        device_mapping = device.split(':')
         if device_mapping:
             path_on_host = device_mapping[0]
             if len(device_mapping) > 1:
@@ -363,34 +324,57 @@ def parse_devices(devices):
                 permissions = device_mapping[2]
             else:
                 permissions = 'rwm'
-            device_list.append({"PathOnHost": path_on_host,
-                                "PathInContainer": path_in_container,
-                                "CgroupPermissions": permissions})
+            device_list.append({
+                'PathOnHost': path_on_host,
+                'PathInContainer': path_in_container,
+                'CgroupPermissions': permissions
+            })
     return device_list
 
 
-def kwargs_from_env(ssl_version=None, assert_hostname=None):
-    host = os.environ.get('DOCKER_HOST')
-    cert_path = os.environ.get('DOCKER_CERT_PATH')
-    tls_verify = os.environ.get('DOCKER_TLS_VERIFY')
+def kwargs_from_env(ssl_version=None, assert_hostname=None, environment=None):
+    if not environment:
+        environment = os.environ
+    host = environment.get('DOCKER_HOST')
+
+    # empty string for cert path is the same as unset.
+    cert_path = environment.get('DOCKER_CERT_PATH') or None
+
+    # empty string for tls verify counts as "false".
+    # Any value or 'unset' counts as true.
+    tls_verify = environment.get('DOCKER_TLS_VERIFY')
+    if tls_verify == '':
+        tls_verify = False
+    else:
+        tls_verify = tls_verify is not None
+    enable_tls = cert_path or tls_verify
 
     params = {}
 
     if host:
-        params['base_url'] = (host.replace('tcp://', 'https://')
-                              if tls_verify else host)
+        params['base_url'] = (
+            host.replace('tcp://', 'https://') if enable_tls else host
+        )
 
-    if tls_verify and not cert_path:
+    if not enable_tls:
+        return params
+
+    if not cert_path:
         cert_path = os.path.join(os.path.expanduser('~'), '.docker')
 
-    if tls_verify and cert_path:
-        params['tls'] = tls.TLSConfig(
-            client_cert=(os.path.join(cert_path, 'cert.pem'),
-                         os.path.join(cert_path, 'key.pem')),
-            ca_cert=os.path.join(cert_path, 'ca.pem'),
-            verify=True,
-            ssl_version=ssl_version,
-            assert_hostname=assert_hostname)
+    if not tls_verify and assert_hostname is None:
+        # assert_hostname is a subset of TLS verification,
+        # so if it's not set already then set it to false.
+        assert_hostname = False
+
+    params['tls'] = tls.TLSConfig(
+        client_cert=(os.path.join(cert_path, 'cert.pem'),
+                     os.path.join(cert_path, 'key.pem')),
+        ca_cert=os.path.join(cert_path, 'ca.pem'),
+        verify=tls_verify,
+        ssl_version=ssl_version,
+        assert_hostname=assert_hostname,
+    )
 
     return params
 
@@ -402,7 +386,10 @@ def convert_filters(filters):
             v = 'true' if v else 'false'
         if not isinstance(v, list):
             v = [v, ]
-        result[k] = v
+        result[k] = [
+            str(item) if not isinstance(item, six.string_types) else item
+            for item in v
+        ]
     return json.dumps(result)
 
 
@@ -413,195 +400,51 @@ def datetime_to_timestamp(dt):
 
 
 def parse_bytes(s):
+    if isinstance(s, six.integer_types + (float,)):
+        return s
     if len(s) == 0:
-        s = 0
+        return 0
+
+    if s[-2:-1].isalpha() and s[-1].isalpha():
+        if s[-1] == "b" or s[-1] == "B":
+            s = s[:-1]
+    units = BYTE_UNITS
+    suffix = s[-1].lower()
+
+    # Check if the variable is a string representation of an int
+    # without a units part. Assuming that the units are bytes.
+    if suffix.isdigit():
+        digits_part = s
+        suffix = 'b'
     else:
-        if s[-2:-1].isalpha() and s[-1].isalpha():
-            if (s[-1] == "b" or s[-1] == "B"):
-                s = s[:-1]
-        units = BYTE_UNITS
-        suffix = s[-1].lower()
+        digits_part = s[:-1]
 
-        # Check if the variable is a string representation of an int
-        # without a units part. Assuming that the units are bytes.
-        if suffix.isdigit():
-            digits_part = s
-            suffix = 'b'
-        else:
-            digits_part = s[:-1]
+    if suffix in units.keys() or suffix.isdigit():
+        try:
+            digits = int(digits_part)
+        except ValueError:
+            raise errors.DockerException(
+                'Failed converting the string value for memory ({0}) to'
+                ' an integer.'.format(digits_part)
+            )
 
-        if suffix in units.keys() or suffix.isdigit():
-            try:
-                digits = int(digits_part)
-            except ValueError:
-                message = ('Failed converting the string value for'
-                           'memory ({0}) to a number.')
-                formatted_message = message.format(digits_part)
-                raise errors.DockerException(formatted_message)
-
-            s = digits * units[suffix]
-        else:
-            message = ('The specified value for memory'
-                       ' ({0}) should specify the units. The postfix'
-                       ' should be one of the `b` `k` `m` `g`'
-                       ' characters')
-            raise errors.DockerException(message.format(s))
+        # Reconvert to long for the final result
+        s = int(digits * units[suffix])
+    else:
+        raise errors.DockerException(
+            'The specified value for memory ({0}) should specify the'
+            ' units. The postfix should be one of the `b` `k` `m` `g`'
+            ' characters'.format(s)
+        )
 
     return s
 
 
-def create_host_config(
-    binds=None, port_bindings=None, lxc_conf=None,
-    publish_all_ports=False, links=None, privileged=False,
-    dns=None, dns_search=None, volumes_from=None, network_mode=None,
-    restart_policy=None, cap_add=None, cap_drop=None, devices=None,
-    extra_hosts=None, read_only=None, pid_mode=None, ipc_mode=None,
-    security_opt=None, ulimits=None, log_config=None, mem_limit=None,
-    memswap_limit=None, cgroup_parent=None, group_add=None, version=None
-):
-    host_config = {}
+def normalize_links(links):
+    if isinstance(links, dict):
+        links = six.iteritems(links)
 
-    if not version:
-        warnings.warn(
-            'docker.utils.create_host_config() is deprecated. Please use '
-            'Client.create_host_config() instead.'
-        )
-        version = constants.DEFAULT_DOCKER_API_VERSION
-
-    if mem_limit is not None:
-        if isinstance(mem_limit, six.string_types):
-            mem_limit = parse_bytes(mem_limit)
-        host_config['Memory'] = mem_limit
-
-    if memswap_limit is not None:
-        if isinstance(memswap_limit, six.string_types):
-            memswap_limit = parse_bytes(memswap_limit)
-        host_config['MemorySwap'] = memswap_limit
-
-    if pid_mode not in (None, 'host'):
-        raise errors.DockerException(
-            'Invalid value for pid param: {0}'.format(pid_mode)
-        )
-    elif pid_mode:
-        host_config['PidMode'] = pid_mode
-
-    if ipc_mode:
-        host_config['IpcMode'] = ipc_mode
-
-    if privileged:
-        host_config['Privileged'] = privileged
-
-    if publish_all_ports:
-        host_config['PublishAllPorts'] = publish_all_ports
-
-    if read_only is not None:
-        host_config['ReadonlyRootfs'] = read_only
-
-    if dns_search:
-        host_config['DnsSearch'] = dns_search
-
-    if network_mode:
-        host_config['NetworkMode'] = network_mode
-    elif network_mode is None and compare_version('1.19', version) > 0:
-        host_config['NetworkMode'] = 'default'
-
-    if restart_policy:
-        host_config['RestartPolicy'] = restart_policy
-
-    if cap_add:
-        host_config['CapAdd'] = cap_add
-
-    if cap_drop:
-        host_config['CapDrop'] = cap_drop
-
-    if devices:
-        host_config['Devices'] = parse_devices(devices)
-
-    if group_add:
-        if compare_version(version, '1.20') < 0:
-            raise errors.InvalidVersion(
-                'group_add param not supported for API version < 1.20'
-            )
-        host_config['GroupAdd'] = [six.text_type(grp) for grp in group_add]
-
-    if dns is not None:
-        host_config['Dns'] = dns
-
-    if security_opt is not None:
-        if not isinstance(security_opt, list):
-            raise errors.DockerException(
-                'Invalid type for security_opt param: expected list but found'
-                ' {0}'.format(type(security_opt))
-            )
-        host_config['SecurityOpt'] = security_opt
-
-    if volumes_from is not None:
-        if isinstance(volumes_from, six.string_types):
-            volumes_from = volumes_from.split(',')
-        host_config['VolumesFrom'] = volumes_from
-
-    if binds is not None:
-        host_config['Binds'] = convert_volume_binds(binds)
-
-    if port_bindings is not None:
-        host_config['PortBindings'] = convert_port_bindings(
-            port_bindings
-        )
-
-    if extra_hosts is not None:
-        if isinstance(extra_hosts, dict):
-            extra_hosts = [
-                '{0}:{1}'.format(k, v)
-                for k, v in sorted(six.iteritems(extra_hosts))
-            ]
-
-        host_config['ExtraHosts'] = extra_hosts
-
-    if links is not None:
-        if isinstance(links, dict):
-            links = six.iteritems(links)
-
-        formatted_links = [
-            '{0}:{1}'.format(k, v) for k, v in sorted(links)
-        ]
-
-        host_config['Links'] = formatted_links
-
-    if isinstance(lxc_conf, dict):
-        formatted = []
-        for k, v in six.iteritems(lxc_conf):
-            formatted.append({'Key': k, 'Value': str(v)})
-        lxc_conf = formatted
-
-    if lxc_conf is not None:
-        host_config['LxcConf'] = lxc_conf
-
-    if cgroup_parent is not None:
-        host_config['CgroupParent'] = cgroup_parent
-
-    if ulimits is not None:
-        if not isinstance(ulimits, list):
-            raise errors.DockerException(
-                'Invalid type for ulimits param: expected list but found'
-                ' {0}'.format(type(ulimits))
-            )
-        host_config['Ulimits'] = []
-        for l in ulimits:
-            if not isinstance(l, Ulimit):
-                l = Ulimit(**l)
-            host_config['Ulimits'].append(l)
-
-    if log_config is not None:
-        if not isinstance(log_config, LogConfig):
-            if not isinstance(log_config, dict):
-                raise errors.DockerException(
-                    'Invalid type for log_config param: expected LogConfig but'
-                    ' found {0}'.format(type(log_config))
-                )
-            log_config = LogConfig(**log_config)
-        host_config['LogConfig'] = log_config
-
-    return host_config
+    return ['{0}:{1}'.format(k, v) if v else k for k, v in sorted(links)]
 
 
 def parse_env_file(env_file):
@@ -617,7 +460,11 @@ def parse_env_file(env_file):
             if line[0] == '#':
                 continue
 
-            parse_line = line.strip().split('=')
+            line = line.strip()
+            if not line:
+                continue
+
+            parse_line = line.split('=', 1)
             if len(parse_line) == 2:
                 k, v = parse_line
                 environment[k] = v
@@ -629,134 +476,37 @@ def parse_env_file(env_file):
     return environment
 
 
-def create_container_config(
-    version, image, command, hostname=None, user=None, detach=False,
-    stdin_open=False, tty=False, mem_limit=None, ports=None, environment=None,
-    dns=None, volumes=None, volumes_from=None, network_disabled=False,
-    entrypoint=None, cpu_shares=None, working_dir=None, domainname=None,
-    memswap_limit=None, cpuset=None, host_config=None, mac_address=None,
-    labels=None, volume_driver=None
-):
-    if isinstance(command, six.string_types):
-        command = shlex.split(str(command))
+def split_command(command):
+    if six.PY2 and not isinstance(command, six.binary_type):
+        command = command.encode('utf-8')
+    return shlex.split(command)
 
-    if isinstance(entrypoint, six.string_types):
-        entrypoint = shlex.split(str(entrypoint))
 
-    if isinstance(environment, dict):
-        environment = [
-            six.text_type('{0}={1}').format(k, v)
-            for k, v in six.iteritems(environment)
+def format_environment(environment):
+    def format_env(key, value):
+        if value is None:
+            return key
+        if isinstance(value, six.binary_type):
+            value = value.decode('utf-8')
+
+        return u'{key}={value}'.format(key=key, value=value)
+    return [format_env(*var) for var in six.iteritems(environment)]
+
+
+def format_extra_hosts(extra_hosts, task=False):
+    # Use format dictated by Swarm API if container is part of a task
+    if task:
+        return [
+            '{} {}'.format(v, k) for k, v in sorted(six.iteritems(extra_hosts))
         ]
 
-    if labels is not None and compare_version('1.18', version) < 0:
-        raise errors.InvalidVersion(
-            'labels were only introduced in API version 1.18'
-        )
+    return [
+        '{}:{}'.format(k, v) for k, v in sorted(six.iteritems(extra_hosts))
+    ]
 
-    if compare_version('1.19', version) < 0:
-        if volume_driver is not None:
-            raise errors.InvalidVersion(
-                'Volume drivers were only introduced in API version 1.19'
-            )
-        mem_limit = mem_limit if mem_limit is not None else 0
-        memswap_limit = memswap_limit if memswap_limit is not None else 0
-    else:
-        if mem_limit is not None:
-            raise errors.InvalidVersion(
-                'mem_limit has been moved to host_config in API version 1.19'
-            )
 
-        if memswap_limit is not None:
-            raise errors.InvalidVersion(
-                'memswap_limit has been moved to host_config in API '
-                'version 1.19'
-            )
-
-    if isinstance(labels, list):
-        labels = dict((lbl, six.text_type('')) for lbl in labels)
-
-    if isinstance(mem_limit, six.string_types):
-        mem_limit = parse_bytes(mem_limit)
-    if isinstance(memswap_limit, six.string_types):
-        memswap_limit = parse_bytes(memswap_limit)
-
-    if isinstance(ports, list):
-        exposed_ports = {}
-        for port_definition in ports:
-            port = port_definition
-            proto = 'tcp'
-            if isinstance(port_definition, tuple):
-                if len(port_definition) == 2:
-                    proto = port_definition[1]
-                port = port_definition[0]
-            exposed_ports['{0}/{1}'.format(port, proto)] = {}
-        ports = exposed_ports
-
-    if isinstance(volumes, six.string_types):
-        volumes = [volumes, ]
-
-    if isinstance(volumes, list):
-        volumes_dict = {}
-        for vol in volumes:
-            volumes_dict[vol] = {}
-        volumes = volumes_dict
-
-    if volumes_from:
-        if not isinstance(volumes_from, six.string_types):
-            volumes_from = ','.join(volumes_from)
-    else:
-        # Force None, an empty list or dict causes client.start to fail
-        volumes_from = None
-
-    attach_stdin = False
-    attach_stdout = False
-    attach_stderr = False
-    stdin_once = False
-
-    if not detach:
-        attach_stdout = True
-        attach_stderr = True
-
-        if stdin_open:
-            attach_stdin = True
-            stdin_once = True
-
-    if compare_version('1.10', version) >= 0:
-        message = ('{0!r} parameter has no effect on create_container().'
-                   ' It has been moved to start()')
-        if dns is not None:
-            raise errors.InvalidVersion(message.format('dns'))
-        if volumes_from is not None:
-            raise errors.InvalidVersion(message.format('volumes_from'))
-
-    return {
-        'Hostname': hostname,
-        'Domainname': domainname,
-        'ExposedPorts': ports,
-        'User': six.text_type(user) if user else None,
-        'Tty': tty,
-        'OpenStdin': stdin_open,
-        'StdinOnce': stdin_once,
-        'Memory': mem_limit,
-        'AttachStdin': attach_stdin,
-        'AttachStdout': attach_stdout,
-        'AttachStderr': attach_stderr,
-        'Env': environment,
-        'Cmd': command,
-        'Dns': dns,
-        'Image': image,
-        'Volumes': volumes,
-        'VolumesFrom': volumes_from,
-        'NetworkDisabled': network_disabled,
-        'Entrypoint': entrypoint,
-        'CpuShares': cpu_shares,
-        'Cpuset': cpuset,
-        'CpusetCpus': cpuset,
-        'WorkingDir': working_dir,
-        'MemorySwap': memswap_limit,
-        'HostConfig': host_config,
-        'MacAddress': mac_address,
-        'Labels': labels,
-        'VolumeDriver': volume_driver,
-    }
+def create_host_config(self, *args, **kwargs):
+    raise errors.DeprecatedMethod(
+        'utils.create_host_config has been removed. Please use a '
+        'docker.types.HostConfig object instead.'
+    )

@@ -1,34 +1,84 @@
 import logging
-import six
-import warnings
+import os
 
-from ..auth import auth
-from ..constants import INSECURE_REGISTRY_DEPRECATION_WARNING
-from .. import utils
-from .. import errors
+import six
+
+from .. import auth, errors, utils
+from ..constants import DEFAULT_DATA_CHUNK_SIZE
 
 log = logging.getLogger(__name__)
 
 
 class ImageApiMixin(object):
 
-    @utils.check_resource
-    def get_image(self, image):
-        res = self._get(self._url("/images/{0}/get", image), stream=True)
-        self._raise_for_status(res)
-        return res.raw
+    @utils.check_resource('image')
+    def get_image(self, image, chunk_size=DEFAULT_DATA_CHUNK_SIZE):
+        """
+        Get a tarball of an image. Similar to the ``docker save`` command.
 
-    @utils.check_resource
+        Args:
+            image (str): Image name to get
+            chunk_size (int): The number of bytes returned by each iteration
+                of the generator. If ``None``, data will be streamed as it is
+                received. Default: 2 MB
+
+        Returns:
+            (generator): A stream of raw archive data.
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+
+        Example:
+
+            >>> image = cli.get_image("busybox:latest")
+            >>> f = open('/tmp/busybox-latest.tar', 'wb')
+            >>> for chunk in image:
+            >>>   f.write(chunk)
+            >>> f.close()
+        """
+        res = self._get(self._url("/images/{0}/get", image), stream=True)
+        return self._stream_raw_result(res, chunk_size, False)
+
+    @utils.check_resource('image')
     def history(self, image):
+        """
+        Show the history of an image.
+
+        Args:
+            image (str): The image to show history for
+
+        Returns:
+            (str): The history of the image
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
         res = self._get(self._url("/images/{0}/history", image))
         return self._result(res, True)
 
-    def images(self, name=None, quiet=False, all=False, viz=False,
-               filters=None):
-        if viz:
-            if utils.compare_version('1.7', self._version) >= 0:
-                raise Exception('Viz output is not supported in API >= 1.7!')
-            return self._result(self._get(self._url("images/viz")))
+    def images(self, name=None, quiet=False, all=False, filters=None):
+        """
+        List images. Similar to the ``docker images`` command.
+
+        Args:
+            name (str): Only show images belonging to the repository ``name``
+            quiet (bool): Only return numeric IDs as a list.
+            all (bool): Show intermediate image layers. By default, these are
+                filtered out.
+            filters (dict): Filters to be processed on the image list.
+                Available filters:
+                - ``dangling`` (bool)
+                - ``label`` (str): format either ``key`` or ``key=value``
+
+        Returns:
+            (dict or list): A list if ``quiet=True``, otherwise a dict.
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
         params = {
             'filter': name,
             'only_ids': 1 if quiet else 0,
@@ -42,124 +92,284 @@ class ImageApiMixin(object):
             return [x['Id'] for x in res]
         return res
 
-    def import_image(self, src=None, repository=None, tag=None, image=None):
-        if src:
-            if isinstance(src, six.string_types):
-                try:
-                    result = self.import_image_from_file(
-                        src, repository=repository, tag=tag)
-                except IOError:
-                    result = self.import_image_from_url(
-                        src, repository=repository, tag=tag)
-            else:
-                result = self.import_image_from_data(
-                    src, repository=repository, tag=tag)
-        elif image:
-            result = self.import_image_from_image(
-                image, repository=repository, tag=tag)
-        else:
-            raise Exception("Must specify a src or image")
+    def import_image(self, src=None, repository=None, tag=None, image=None,
+                     changes=None, stream_src=False):
+        """
+        Import an image. Similar to the ``docker import`` command.
 
-        return result
+        If ``src`` is a string or unicode string, it will first be treated as a
+        path to a tarball on the local system. If there is an error reading
+        from that file, ``src`` will be treated as a URL instead to fetch the
+        image from. You can also pass an open file handle as ``src``, in which
+        case the data will be read from that file.
 
-    def import_image_from_data(self, data, repository=None, tag=None):
-        u = self._url("/images/create")
-        params = {
-            'fromSrc': '-',
-            'repo': repository,
-            'tag': tag
-        }
-        headers = {
-            'Content-Type': 'application/tar',
-        }
-        return self._result(
-            self._post(u, data=data, params=params, headers=headers))
+        If ``src`` is unset but ``image`` is set, the ``image`` parameter will
+        be taken as the name of an existing image to import from.
 
-    def import_image_from_file(self, filename, repository=None, tag=None):
-        u = self._url("/images/create")
-        params = {
-            'fromSrc': '-',
-            'repo': repository,
-            'tag': tag
-        }
-        headers = {
-            'Content-Type': 'application/tar',
-        }
-        with open(filename, 'rb') as f:
-            return self._result(
-                self._post(u, data=f, params=params, headers=headers,
-                           timeout=None))
-
-    def import_image_from_stream(self, stream, repository=None, tag=None):
-        u = self._url("/images/create")
-        params = {
-            'fromSrc': '-',
-            'repo': repository,
-            'tag': tag
-        }
-        headers = {
-            'Content-Type': 'application/tar',
-            'Transfer-Encoding': 'chunked',
-        }
-        return self._result(
-            self._post(u, data=stream, params=params, headers=headers))
-
-    def import_image_from_url(self, url, repository=None, tag=None):
-        u = self._url("/images/create")
-        params = {
-            'fromSrc': url,
-            'repo': repository,
-            'tag': tag
-        }
-        return self._result(
-            self._post(u, data=None, params=params))
-
-    def import_image_from_image(self, image, repository=None, tag=None):
-        u = self._url("/images/create")
-        params = {
-            'fromImage': image,
-            'repo': repository,
-            'tag': tag
-        }
-        return self._result(
-            self._post(u, data=None, params=params))
-
-    @utils.check_resource
-    def insert(self, image, url, path):
-        if utils.compare_version('1.12', self._version) >= 0:
-            raise errors.DeprecatedMethod(
-                'insert is not available for API version >=1.12'
+        Args:
+            src (str or file): Path to tarfile, URL, or file-like object
+            repository (str): The repository to create
+            tag (str): The tag to apply
+            image (str): Use another image like the ``FROM`` Dockerfile
+                parameter
+        """
+        if not (src or image):
+            raise errors.DockerException(
+                'Must specify src or image to import from'
             )
-        api_url = self._url("/images/{0}/insert", image)
-        params = {
-            'url': url,
-            'path': path
-        }
-        return self._result(self._post(api_url, params=params))
+        u = self._url('/images/create')
 
-    @utils.check_resource
+        params = _import_image_params(
+            repository, tag, image,
+            src=(src if isinstance(src, six.string_types) else None),
+            changes=changes
+        )
+        headers = {'Content-Type': 'application/tar'}
+
+        if image or params.get('fromSrc') != '-':  # from image or URL
+            return self._result(
+                self._post(u, data=None, params=params)
+            )
+        elif isinstance(src, six.string_types):  # from file path
+            with open(src, 'rb') as f:
+                return self._result(
+                    self._post(
+                        u, data=f, params=params, headers=headers, timeout=None
+                    )
+                )
+        else:  # from raw data
+            if stream_src:
+                headers['Transfer-Encoding'] = 'chunked'
+            return self._result(
+                self._post(u, data=src, params=params, headers=headers)
+            )
+
+    def import_image_from_data(self, data, repository=None, tag=None,
+                               changes=None):
+        """
+        Like :py:meth:`~docker.api.image.ImageApiMixin.import_image`, but
+        allows importing in-memory bytes data.
+
+        Args:
+            data (bytes collection): Bytes collection containing valid tar data
+            repository (str): The repository to create
+            tag (str): The tag to apply
+        """
+
+        u = self._url('/images/create')
+        params = _import_image_params(
+            repository, tag, src='-', changes=changes
+        )
+        headers = {'Content-Type': 'application/tar'}
+        return self._result(
+            self._post(
+                u, data=data, params=params, headers=headers, timeout=None
+            )
+        )
+
+    def import_image_from_file(self, filename, repository=None, tag=None,
+                               changes=None):
+        """
+        Like :py:meth:`~docker.api.image.ImageApiMixin.import_image`, but only
+        supports importing from a tar file on disk.
+
+        Args:
+            filename (str): Full path to a tar file.
+            repository (str): The repository to create
+            tag (str): The tag to apply
+
+        Raises:
+            IOError: File does not exist.
+        """
+
+        return self.import_image(
+            src=filename, repository=repository, tag=tag, changes=changes
+        )
+
+    def import_image_from_stream(self, stream, repository=None, tag=None,
+                                 changes=None):
+        return self.import_image(
+            src=stream, stream_src=True, repository=repository, tag=tag,
+            changes=changes
+        )
+
+    def import_image_from_url(self, url, repository=None, tag=None,
+                              changes=None):
+        """
+        Like :py:meth:`~docker.api.image.ImageApiMixin.import_image`, but only
+        supports importing from a URL.
+
+        Args:
+            url (str): A URL pointing to a tar file.
+            repository (str): The repository to create
+            tag (str): The tag to apply
+        """
+        return self.import_image(
+            src=url, repository=repository, tag=tag, changes=changes
+        )
+
+    def import_image_from_image(self, image, repository=None, tag=None,
+                                changes=None):
+        """
+        Like :py:meth:`~docker.api.image.ImageApiMixin.import_image`, but only
+        supports importing from another image, like the ``FROM`` Dockerfile
+        parameter.
+
+        Args:
+            image (str): Image name to import from
+            repository (str): The repository to create
+            tag (str): The tag to apply
+        """
+        return self.import_image(
+            image=image, repository=repository, tag=tag, changes=changes
+        )
+
+    @utils.check_resource('image')
     def inspect_image(self, image):
+        """
+        Get detailed information about an image. Similar to the ``docker
+        inspect`` command, but only for images.
+
+        Args:
+            image (str): The image to inspect
+
+        Returns:
+            (dict): Similar to the output of ``docker inspect``, but as a
+        single dict
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
         return self._result(
             self._get(self._url("/images/{0}/json", image)), True
         )
 
-    def load_image(self, data):
-        res = self._post(self._url("/images/load"), data=data)
+    @utils.minimum_version('1.30')
+    @utils.check_resource('image')
+    def inspect_distribution(self, image):
+        """
+        Get image digest and platform information by contacting the registry.
+
+        Args:
+            image (str): The image name to inspect
+
+        Returns:
+            (dict): A dict containing distribution data
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
+
+        return self._result(
+            self._get(self._url("/distribution/{0}/json", image)), True
+        )
+
+    def load_image(self, data, quiet=None):
+        """
+        Load an image that was previously saved using
+        :py:meth:`~docker.api.image.ImageApiMixin.get_image` (or ``docker
+        save``). Similar to ``docker load``.
+
+        Args:
+            data (binary): Image data to be loaded.
+            quiet (boolean): Suppress progress details in response.
+
+        Returns:
+            (generator): Progress output as JSON objects. Only available for
+                         API version >= 1.23
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
+        params = {}
+
+        if quiet is not None:
+            if utils.version_lt(self._version, '1.23'):
+                raise errors.InvalidVersion(
+                    'quiet is not supported in API version < 1.23'
+                )
+            params['quiet'] = quiet
+
+        res = self._post(
+            self._url("/images/load"), data=data, params=params, stream=True
+        )
+        if utils.version_gte(self._version, '1.23'):
+            return self._stream_helper(res, decode=True)
+
         self._raise_for_status(res)
 
-    def pull(self, repository, tag=None, stream=False,
-             insecure_registry=False, auth_config=None):
-        if insecure_registry:
-            warnings.warn(
-                INSECURE_REGISTRY_DEPRECATION_WARNING.format('pull()'),
-                DeprecationWarning
-            )
+    @utils.minimum_version('1.25')
+    def prune_images(self, filters=None):
+        """
+        Delete unused images
 
+        Args:
+            filters (dict): Filters to process on the prune list.
+                Available filters:
+                - dangling (bool):  When set to true (or 1), prune only
+                unused and untagged images.
+
+        Returns:
+            (dict): A dict containing a list of deleted image IDs and
+                the amount of disk space reclaimed in bytes.
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
+        url = self._url("/images/prune")
+        params = {}
+        if filters is not None:
+            params['filters'] = utils.convert_filters(filters)
+        return self._result(self._post(url, params=params), True)
+
+    def pull(self, repository, tag=None, stream=False, auth_config=None,
+             decode=False, platform=None):
+        """
+        Pulls an image. Similar to the ``docker pull`` command.
+
+        Args:
+            repository (str): The repository to pull
+            tag (str): The tag to pull
+            stream (bool): Stream the output as a generator. Make sure to
+                consume the generator, otherwise pull might get cancelled.
+            auth_config (dict): Override the credentials that
+                :py:meth:`~docker.api.daemon.DaemonApiMixin.login` has set for
+                this request. ``auth_config`` should contain the ``username``
+                and ``password`` keys to be valid.
+            decode (bool): Decode the JSON data from the server into dicts.
+                Only applies with ``stream=True``
+            platform (str): Platform in the format ``os[/arch[/variant]]``
+
+        Returns:
+            (generator or str): The output
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+
+        Example:
+
+            >>> for line in cli.pull('busybox', stream=True, decode=True):
+            ...     print(json.dumps(line, indent=4))
+            {
+                "status": "Pulling image (latest) from busybox",
+                "progressDetail": {},
+                "id": "e72ac664f4f0"
+            }
+            {
+                "status": "Pulling image (latest) from busybox, endpoint: ...",
+                "progressDetail": {},
+                "id": "e72ac664f4f0"
+            }
+
+        """
         if not tag:
             repository, tag = utils.parse_repository_tag(repository)
         registry, repo_name = auth.resolve_repository_name(repository)
-        if repo_name.count(":") == 1:
-            repository, tag = repository.rsplit(":", 1)
 
         params = {
             'tag': tag,
@@ -167,31 +377,20 @@ class ImageApiMixin(object):
         }
         headers = {}
 
-        if utils.compare_version('1.5', self._version) >= 0:
-            # If we don't have any auth data so far, try reloading the config
-            # file one more time in case anything showed up in there.
-            if auth_config is None:
-                log.debug('Looking for auth config')
-                if not self._auth_configs:
-                    log.debug(
-                        "No auth config in memory - loading from filesystem")
-                    self._auth_configs = auth.load_config()
-                authcfg = auth.resolve_authconfig(self._auth_configs, registry)
-                # Do not fail here if no authentication exists for this
-                # specific registry as we can have a readonly pull. Just
-                # put the header if we can.
-                if authcfg:
-                    log.debug('Found auth config')
-                    # auth_config needs to be a dict in the format used by
-                    # auth.py username , password, serveraddress, email
-                    headers['X-Registry-Auth'] = auth.encode_header(
-                        authcfg
-                    )
-                else:
-                    log.debug('No auth config found')
-            else:
-                log.debug('Sending supplied auth config')
-                headers['X-Registry-Auth'] = auth.encode_header(auth_config)
+        if auth_config is None:
+            header = auth.get_config_header(self, registry)
+            if header:
+                headers['X-Registry-Auth'] = header
+        else:
+            log.debug('Sending supplied auth config')
+            headers['X-Registry-Auth'] = auth.encode_header(auth_config)
+
+        if platform is not None:
+            if utils.version_lt(self._version, '1.32'):
+                raise errors.InvalidVersion(
+                    'platform was only introduced in API version 1.32'
+                )
+            params['platform'] = platform
 
         response = self._post(
             self._url('/images/create'), params=params, headers=headers,
@@ -201,18 +400,44 @@ class ImageApiMixin(object):
         self._raise_for_status(response)
 
         if stream:
-            return self._stream_helper(response)
+            return self._stream_helper(response, decode=decode)
 
         return self._result(response)
 
-    def push(self, repository, tag=None, stream=False,
-             insecure_registry=False):
-        if insecure_registry:
-            warnings.warn(
-                INSECURE_REGISTRY_DEPRECATION_WARNING.format('push()'),
-                DeprecationWarning
-            )
+    def push(self, repository, tag=None, stream=False, auth_config=None,
+             decode=False):
+        """
+        Push an image or a repository to the registry. Similar to the ``docker
+        push`` command.
 
+        Args:
+            repository (str): The repository to push to
+            tag (str): An optional tag to push
+            stream (bool): Stream the output as a blocking generator
+            auth_config (dict): Override the credentials that
+                :py:meth:`~docker.api.daemon.DaemonApiMixin.login` has set for
+                this request. ``auth_config`` should contain the ``username``
+                and ``password`` keys to be valid.
+            decode (bool): Decode the JSON data from the server into dicts.
+                Only applies with ``stream=True``
+
+        Returns:
+            (generator or str): The output from the server.
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+
+        Example:
+            >>> for line in cli.push('yourname/app', stream=True, decode=True):
+            ...   print(line)
+            {'status': 'Pushing repository yourname/app (1 tags)'}
+            {'status': 'Pushing','progressDetail': {}, 'id': '511136ea3c5a'}
+            {'status': 'Image already pushed, skipping', 'progressDetail':{},
+             'id': '511136ea3c5a'}
+            ...
+
+        """
         if not tag:
             repository, tag = utils.parse_repository_tag(repository)
         registry, repo_name = auth.resolve_repository_name(repository)
@@ -222,18 +447,13 @@ class ImageApiMixin(object):
         }
         headers = {}
 
-        if utils.compare_version('1.5', self._version) >= 0:
-            # If we don't have any auth data so far, try reloading the config
-            # file one more time in case anything showed up in there.
-            if not self._auth_configs:
-                self._auth_configs = auth.load_config()
-            authcfg = auth.resolve_authconfig(self._auth_configs, registry)
-
-            # Do not fail here if no authentication exists for this specific
-            # registry as we can have a readonly pull. Just put the header if
-            # we can.
-            if authcfg:
-                headers['X-Registry-Auth'] = auth.encode_header(authcfg)
+        if auth_config is None:
+            header = auth.get_config_header(self, registry)
+            if header:
+                headers['X-Registry-Auth'] = header
+        else:
+            log.debug('Sending supplied auth config')
+            headers['X-Registry-Auth'] = auth.encode_header(auth_config)
 
         response = self._post_json(
             u, None, headers=headers, stream=stream, params=params
@@ -242,24 +462,67 @@ class ImageApiMixin(object):
         self._raise_for_status(response)
 
         if stream:
-            return self._stream_helper(response)
+            return self._stream_helper(response, decode=decode)
 
         return self._result(response)
 
-    @utils.check_resource
+    @utils.check_resource('image')
     def remove_image(self, image, force=False, noprune=False):
+        """
+        Remove an image. Similar to the ``docker rmi`` command.
+
+        Args:
+            image (str): The image to remove
+            force (bool): Force removal of the image
+            noprune (bool): Do not delete untagged parents
+        """
         params = {'force': force, 'noprune': noprune}
         res = self._delete(self._url("/images/{0}", image), params=params)
-        self._raise_for_status(res)
+        return self._result(res, True)
 
     def search(self, term):
+        """
+        Search for images on Docker Hub. Similar to the ``docker search``
+        command.
+
+        Args:
+            term (str): A term to search for.
+
+        Returns:
+            (list of dicts): The response of the search.
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+        """
         return self._result(
             self._get(self._url("/images/search"), params={'term': term}),
             True
         )
 
-    @utils.check_resource
+    @utils.check_resource('image')
     def tag(self, image, repository, tag=None, force=False):
+        """
+        Tag an image into a repository. Similar to the ``docker tag`` command.
+
+        Args:
+            image (str): The image to tag
+            repository (str): The repository to set for the tag
+            tag (str): The tag name
+            force (bool): Force
+
+        Returns:
+            (bool): ``True`` if successful
+
+        Raises:
+            :py:class:`docker.errors.APIError`
+                If the server returns an error.
+
+        Example:
+
+            >>> client.tag('ubuntu', 'localhost:5000/ubuntu', 'latest',
+                           force=True)
+        """
         params = {
             'tag': tag,
             'repo': repository,
@@ -269,3 +532,32 @@ class ImageApiMixin(object):
         res = self._post(url, params=params)
         self._raise_for_status(res)
         return res.status_code == 201
+
+
+def is_file(src):
+    try:
+        return (
+            isinstance(src, six.string_types) and
+            os.path.isfile(src)
+        )
+    except TypeError:  # a data string will make isfile() raise a TypeError
+        return False
+
+
+def _import_image_params(repo, tag, image=None, src=None,
+                         changes=None):
+    params = {
+        'repo': repo,
+        'tag': tag,
+    }
+    if image:
+        params['fromImage'] = image
+    elif src and not is_file(src):
+        params['fromSrc'] = src
+    else:
+        params['fromSrc'] = '-'
+
+    if changes:
+        params['changes'] = changes
+
+    return params
